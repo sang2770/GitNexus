@@ -107,4 +107,43 @@ describe('generateAIContextFiles', () => {
     expect(agentsAfter).toBe(agentsContent);
     expect(claudeAfter).toBe(claudeContent);
   });
+
+  it('with --ide vscode, does not install .claude skills', async () => {
+    const caseDir = await fs.mkdtemp(path.join(tmpDir, 'vscode-only-'));
+    const caseStoragePath = path.join(caseDir, '.gitnexus');
+    await fs.mkdir(caseStoragePath, { recursive: true });
+
+    const stats = { nodes: 7, edges: 9, processes: 1 };
+    await generateAIContextFiles(caseDir, caseStoragePath, 'TestProject', stats, undefined, {
+      ide: 'vscode',
+    });
+
+    const claudeSkillsDir = path.join(caseDir, '.claude', 'skills', 'gitnexus');
+    await expect(fs.access(claudeSkillsDir)).rejects.toThrow();
+
+    const githubSkillsDir = path.join(caseDir, '.github', 'skills');
+    await expect(fs.access(githubSkillsDir)).resolves.not.toThrow();
+  });
+
+  it('with --ide vscode, writes .vscode/mcp.json with gitnexus server', async () => {
+    const caseDir = await fs.mkdtemp(path.join(tmpDir, 'vscode-mcp-'));
+    const caseStoragePath = path.join(caseDir, '.gitnexus');
+    await fs.mkdir(caseStoragePath, { recursive: true });
+
+    const stats = { nodes: 8, edges: 12, processes: 2 };
+    await generateAIContextFiles(caseDir, caseStoragePath, 'TestProject', stats, undefined, {
+      ide: 'vscode',
+    });
+
+    const mcpPath = path.join(caseDir, '.vscode', 'mcp.json');
+    const mcpRaw = await fs.readFile(mcpPath, 'utf-8');
+    const mcp = JSON.parse(mcpRaw) as {
+      servers?: Record<string, { type?: string; command?: string; args?: string[] }>;
+    };
+
+    expect(mcp.servers?.gitnexus).toBeDefined();
+    expect(mcp.servers?.gitnexus?.type).toBe('stdio');
+    expect(mcp.servers?.gitnexus?.command).toBe('npx');
+    expect(mcp.servers?.gitnexus?.args).toEqual(['-y', 'gitnexus@latest', 'mcp']);
+  });
 });

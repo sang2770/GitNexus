@@ -27,6 +27,12 @@ interface RepoStats {
 export interface AIContextOptions {
   skipAgentsMd?: boolean;
   noStats?: boolean;
+  /**
+   * Comma-separated list of IDEs to generate context files for.
+   * Accepted values: claude, cursor, vscode, all (default: all)
+   * Example: "claude,vscode" generates CLAUDE.md + .github/copilot-instructions.md only.
+   */
+  ide?: string;
 }
 
 const GITNEXUS_START_MARKER = '<!-- gitnexus:start -->';
@@ -241,12 +247,17 @@ async function upsertGitNexusSection(
 }
 
 /**
- * Install GitNexus skills to .claude/skills/gitnexus/
- * Works natively with Claude Code, Cursor, and GitHub Copilot
+ * Install GitNexus skills to per-IDE locations.
+ * - .claude/skills/gitnexus/ for Claude Code and Cursor
+ * - .github/skills/ for VS Code Copilot
  */
-async function installSkills(repoPath: string): Promise<string[]> {
-  const skillsDir = path.join(repoPath, '.claude', 'skills', 'gitnexus');
+async function installSkills(
+  repoPath: string,
+  ideTargets?: Set<string>,
+): Promise<{ skills: string[]; installedClaude: boolean; installedGithub: boolean }> {
   const installedSkills: string[] = [];
+  let installedClaude = false;
+  let installedGithub = false;
 
   // Skill definitions bundled with the package
   const skills = [
@@ -282,23 +293,41 @@ async function installSkills(repoPath: string): Promise<string[]> {
     },
   ];
 
+  const shouldInstallClaudeSkills =
+    !ideTargets || ideTargets.has('claude') || ideTargets.has('cursor');
+  const shouldInstallGithubSkills = !ideTargets || ideTargets.has('vscode');
+
   for (const skill of skills) {
-    const skillDir = path.join(skillsDir, skill.name);
-    const skillPath = path.join(skillDir, 'SKILL.md');
+    // Collect target directories for this skill
+    const skillDirs: Array<{ dir: string; target: 'claude' | 'github' }> = [];
 
+    if (shouldInstallClaudeSkills) {
+      skillDirs.push({
+        dir: path.join(repoPath, '.claude', 'skills', 'gitnexus', skill.name),
+        target: 'claude',
+      });
+    }
+
+    if (shouldInstallGithubSkills) {
+      skillDirs.push({
+        dir: path.join(repoPath, '.github', 'skills', skill.name),
+        target: 'github',
+      });
+    }
+
+    if (skillDirs.length === 0) {
+      continue;
+    }
+
+    let skillContent: string | undefined;
+
+    // Read package skill content once
     try {
-      // Create skill directory
-      await fs.mkdir(skillDir, { recursive: true });
-
-      // Try to read from package skills directory
       const packageSkillPath = path.join(__dirname, '..', '..', 'skills', `${skill.name}.md`);
-      let skillContent: string;
-
-      try {
-        skillContent = await fs.readFile(packageSkillPath, 'utf-8');
-      } catch {
-        // Fallback: generate minimal skill content
-        skillContent = `---
+      skillContent = await fs.readFile(packageSkillPath, 'utf-8');
+    } catch {
+      // Fallback: generate minimal skill content
+      skillContent = `---
 name: ${skill.name}
 description: ${skill.description}
 ---
@@ -309,17 +338,172 @@ ${skill.description}
 
 Use GitNexus tools to accomplish this task.
 `;
-      }
+    }
 
-      await fs.writeFile(skillPath, skillContent, 'utf-8');
-      installedSkills.push(skill.name);
+    let installed = false;
+    for (const skillDir of skillDirs) {
+      const skillPath = path.join(skillDir.dir, 'SKILL.md');
+      try {
+        await fs.mkdir(skillDir.dir, { recursive: true });
+        await fs.writeFile(skillPath, skillContent, 'utf-8');
+        installed = true;
+        if (skillDir.target === 'claude') installedClaude = true;
+        if (skillDir.target === 'github') installedGithub = true;
+      } catch (err) {
+        console.warn(`Warning: Could not install skill ${skill.name} to ${skillDir.dir}:`, err);
+      }
+    }
+    if (installed) installedSkills.push(skill.name);
+  }
+
+  return { skills: installedSkills, installedClaude, installedGithub };
+}
+
+/**
+ * Install VS Code MCP config to .vscode/mcp.json
+ */
+async function installVSCodeMcpConfig(
+  repoPath: string,
+): Promise<'created' | 'updated' | 'unchanged' | 'skipped'> {
+  const vscodeDir = path.join(repoPath, '.vscode');
+  const mcpPath = path.join(vscodeDir, 'mcp.json');
+  const existed = await fileExists(mcpPath);
+
+  let config: Record<string, any> = {};
+  if (existed) {
+    try {
+      const raw = await fs.readFile(mcpPath, 'utf-8');
+      config = raw.trim() ? JSON.parse(raw) : {};
     } catch (err) {
-      // Skip on error, don't fail the whole process
-      console.warn(`Warning: Could not install skill ${skill.name}:`, err);
+      console.warn('Warning: Could not parse existing .vscode/mcp.json, skipping update:', err);
+      return 'skipped';
     }
   }
 
-  return installedSkills;
+  const servers =
+    config.servers && typeof config.servers === 'object' && !Array.isArray(config.servers)
+      ? { ...config.servers }
+      : {};
+
+  const desiredServer = {
+    type: 'stdio',
+    command: 'npx',
+    args: ['-y', 'gitnexus@latest', 'mcp'],
+  };
+
+  const existingServer = servers.gitnexus;
+  const unchanged = JSON.stringify(existingServer) === JSON.stringify(desiredServer);
+  if (unchanged) {
+    return 'unchanged';
+  }
+
+  servers.gitnexus = desiredServer;
+  const nextConfig = { ...config, servers };
+
+  try {
+    await fs.mkdir(vscodeDir, { recursive: true });
+    await fs.writeFile(mcpPath, `${JSON.stringify(nextConfig, null, 2)}\n`, 'utf-8');
+    return existed ? 'updated' : 'created';
+  } catch (err) {
+    console.warn('Warning: Could not write .vscode/mcp.json:', err);
+    return 'skipped';
+  }
+}
+
+/**
+ * Generate the GitNexus custom agent file for VS Code Copilot.
+ * Stored at .github/agents/gitnexus.agent.md — VS Code reads all *.agent.md files there.
+ */
+function generateVSCodeAgentContent(projectName: string): string {
+  return `---
+name: gitnexus
+description: >
+  GitNexus code-intelligence agent for the ${projectName} repository.
+  Use this agent when working on architecture exploration, impact analysis,
+  debugging, or safe refactoring tasks that require querying the knowledge graph.
+tools:
+  - gitnexus/*
+---
+
+# GitNexus Agent
+
+You are a code-intelligence assistant powered by the GitNexus knowledge graph for the **${projectName}** repository. Your role is to help developers understand code, assess the blast radius of changes, trace bugs, and refactor safely.
+
+## Always do
+
+- **MUST run impact analysis before editing any symbol.** Call \`gitnexus_impact\` with \`target\` set to the symbol name and \`direction: "upstream"\` before modifying any function, class, or method. Report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run \`gitnexus_detect_changes()\` before committing** to verify your changes only touch expected symbols and execution flows.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding.
+- When exploring unfamiliar code, use \`gitnexus_query\` to find execution flows instead of grepping.
+- When you need a full 360° view of one symbol (callers, callees, execution flow membership), use \`gitnexus_context\`.
+
+## When debugging
+
+1. \`gitnexus_query({query: "<error or symptom>"})\` — find execution flows related to the issue
+2. \`gitnexus_context({name: "<suspect function>"})\` — see callers, callees, and process participation
+3. Read \`gitnexus://repo/${projectName}/process/{processName}\` — trace the full execution flow step by step
+4. For regressions: \`gitnexus_detect_changes({scope: "compare", base_ref: "main"})\` — see what your branch changed
+
+## When refactoring
+
+- **Renaming**: MUST use \`gitnexus_rename({symbol_name: "old", new_name: "new", dry_run: true})\` first. Review the preview, then run with \`dry_run: false\`.
+- **Extracting/Splitting**: MUST run \`gitnexus_context\` to see all incoming/outgoing refs, then \`gitnexus_impact\` to find all external callers before moving code.
+- After any refactor: run \`gitnexus_detect_changes({scope: "all"})\` to verify only expected files changed.
+
+## Never do
+
+- NEVER edit a function, class, or method without first running \`gitnexus_impact\` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use \`gitnexus_rename\` which understands the call graph.
+- NEVER commit without running \`gitnexus_detect_changes()\`.
+
+## Self-check before finishing
+
+1. \`gitnexus_impact\` was run for all modified symbols
+2. No HIGH/CRITICAL risk warnings were ignored
+3. \`gitnexus_detect_changes()\` confirms changes match expected scope
+4. All d=1 (WILL BREAK) dependents were updated
+`;
+}
+
+/**
+ * Install the GitNexus custom agent for VS Code to .github/agents/gitnexus.agent.md
+ */
+async function installVSCodeAgent(
+  repoPath: string,
+  projectName: string,
+): Promise<'created' | 'updated' | 'skipped'> {
+  const agentsDir = path.join(repoPath, '.github', 'agents');
+  const agentPath = path.join(agentsDir, 'gitnexus.agent.md');
+  try {
+    const existed = await fileExists(agentPath);
+    await fs.mkdir(agentsDir, { recursive: true });
+    const content = generateVSCodeAgentContent(projectName);
+    await fs.writeFile(agentPath, content, 'utf-8');
+    return existed ? 'updated' : 'created';
+  } catch (err) {
+    console.warn('Warning: Could not install VS Code agent:', err);
+    return 'skipped';
+  }
+}
+
+/**
+ * Parse the --ide option string into a normalized set of target IDE keys.
+ * Returns a Set containing any of: 'claude', 'cursor', 'vscode'.
+ * An empty/undefined value or 'all' returns all three.
+ */
+function parseIdeTargets(ide?: string): Set<string> {
+  const all = new Set(['claude', 'cursor', 'vscode']);
+  if (!ide || ide.trim() === '' || ide.trim().toLowerCase() === 'all') return all;
+  const requested = ide
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const valid = new Set<string>();
+  for (const r of requested) {
+    if (all.has(r)) valid.add(r);
+  }
+  return valid.size > 0 ? valid : all;
 }
 
 /**
@@ -342,26 +526,68 @@ export async function generateAIContextFiles(
     options?.noStats,
   );
   const createdFiles: string[] = [];
+  const ideTargets = parseIdeTargets(options?.ide);
 
   if (!options?.skipAgentsMd) {
-    // Create AGENTS.md (standard for Cursor, Windsurf, OpenCode, Cline, etc.)
-    const agentsPath = path.join(repoPath, 'AGENTS.md');
-    const agentsResult = await upsertGitNexusSection(agentsPath, content);
-    createdFiles.push(`AGENTS.md (${agentsResult})`);
+    // AGENTS.md — Cursor, Windsurf, OpenCode, Cline, and VS Code Copilot (AGENTS.md is read by Copilot too)
+    if (ideTargets.has('cursor')) {
+      const agentsPath = path.join(repoPath, 'AGENTS.md');
+      const agentsResult = await upsertGitNexusSection(agentsPath, content);
+      createdFiles.push(`AGENTS.md (${agentsResult})`);
+    } else {
+      createdFiles.push('AGENTS.md (skipped — not in --ide targets)');
+    }
 
-    // Create CLAUDE.md (for Claude Code)
-    const claudePath = path.join(repoPath, 'CLAUDE.md');
-    const claudeResult = await upsertGitNexusSection(claudePath, content);
-    createdFiles.push(`CLAUDE.md (${claudeResult})`);
+    // CLAUDE.md — Claude Code
+    if (ideTargets.has('claude')) {
+      const claudePath = path.join(repoPath, 'CLAUDE.md');
+      const claudeResult = await upsertGitNexusSection(claudePath, content);
+      createdFiles.push(`CLAUDE.md (${claudeResult})`);
+    } else {
+      createdFiles.push('CLAUDE.md (skipped — not in --ide targets)');
+    }
+
+    // .github/copilot-instructions.md — VS Code Copilot always-on instructions
+    if (ideTargets.has('vscode')) {
+      const githubDir = path.join(repoPath, '.github');
+      await fs.mkdir(githubDir, { recursive: true });
+      const copilotPath = path.join(githubDir, 'copilot-instructions.md');
+      const copilotResult = await upsertGitNexusSection(copilotPath, content);
+      createdFiles.push(`.github/copilot-instructions.md (${copilotResult})`);
+    } else {
+      createdFiles.push('.github/copilot-instructions.md (skipped — not in --ide targets)');
+    }
   } else {
     createdFiles.push('AGENTS.md (skipped via --skip-agents-md)');
     createdFiles.push('CLAUDE.md (skipped via --skip-agents-md)');
+    createdFiles.push('.github/copilot-instructions.md (skipped via --skip-agents-md)');
   }
 
-  // Install skills to .claude/skills/gitnexus/
-  const installedSkills = await installSkills(repoPath);
-  if (installedSkills.length > 0) {
-    createdFiles.push(`.claude/skills/gitnexus/ (${installedSkills.length} skills)`);
+  // Install skills to selected IDE skill locations
+  const skillInstallResult = await installSkills(repoPath, ideTargets);
+  if (skillInstallResult.skills.length > 0) {
+    if (skillInstallResult.installedClaude) {
+      createdFiles.push(`.claude/skills/gitnexus/ (${skillInstallResult.skills.length} skills)`);
+    }
+    if (skillInstallResult.installedGithub) {
+      createdFiles.push(`.github/skills/ (${skillInstallResult.skills.length} skills)`);
+    }
+  }
+
+  // Install VS Code custom agent to .github/agents/gitnexus.agent.md
+  if (!options?.skipAgentsMd && (!ideTargets || ideTargets.has('vscode'))) {
+    const agentResult = await installVSCodeAgent(repoPath, projectName);
+    if (agentResult !== 'skipped') {
+      createdFiles.push(`.github/agents/gitnexus.agent.md (${agentResult})`);
+    }
+  }
+
+  // Install VS Code workspace MCP configuration for GitHub Copilot
+  if (!options?.skipAgentsMd && (!ideTargets || ideTargets.has('vscode'))) {
+    const mcpResult = await installVSCodeMcpConfig(repoPath);
+    if (mcpResult !== 'skipped') {
+      createdFiles.push(`.vscode/mcp.json (${mcpResult})`);
+    }
   }
 
   return { files: createdFiles };

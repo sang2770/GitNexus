@@ -9,6 +9,7 @@ describe('setupCommand skills integration', () => {
   let tempHome: string;
   const originalHome = process.env.HOME;
   const originalUserProfile = process.env.USERPROFILE;
+  const originalAppData = process.env.APPDATA;
   const originalPath = process.env.PATH;
   const testId = `${Date.now()}-${process.pid}`;
   const flatSkillName = `test-flat-skill-${testId}`;
@@ -20,7 +21,18 @@ describe('setupCommand skills integration', () => {
     tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'gn-setup-home-'));
     process.env.HOME = tempHome;
     process.env.USERPROFILE = tempHome; // os.homedir() checks USERPROFILE on Windows
+    process.env.APPDATA = path.join(tempHome, 'AppData', 'Roaming');
     await fs.mkdir(path.join(tempHome, '.cursor'), { recursive: true });
+
+    if (process.platform === 'win32') {
+      await fs.mkdir(path.join(process.env.APPDATA, 'Code', 'User'), { recursive: true });
+    } else if (process.platform === 'darwin') {
+      await fs.mkdir(path.join(tempHome, 'Library', 'Application Support', 'Code', 'User'), {
+        recursive: true,
+      });
+    } else {
+      await fs.mkdir(path.join(tempHome, '.config', 'Code', 'User'), { recursive: true });
+    }
 
     // Create temporary source skills to verify both supported source layouts:
     // - flat file: skills/{name}.md
@@ -48,8 +60,30 @@ describe('setupCommand skills integration', () => {
     await fs.rm(path.join(packageSkillsRoot, dirSkillName), { recursive: true, force: true });
     process.env.HOME = originalHome;
     process.env.USERPROFILE = originalUserProfile;
+    process.env.APPDATA = originalAppData;
     process.env.PATH = originalPath;
     await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  it('configures VS Code user MCP mcp.json', async () => {
+    await setupCommand();
+
+    const mcpPath =
+      process.platform === 'win32'
+        ? path.join(tempHome, 'AppData', 'Roaming', 'Code', 'User', 'mcp.json')
+        : process.platform === 'darwin'
+          ? path.join(tempHome, 'Library', 'Application Support', 'Code', 'User', 'mcp.json')
+          : path.join(tempHome, '.config', 'Code', 'User', 'mcp.json');
+
+    const configRaw = await fs.readFile(mcpPath, 'utf-8');
+    const config = JSON.parse(configRaw) as {
+      servers?: Record<string, { command?: string; args?: string[]; type?: string }>;
+    };
+
+    expect(config.servers?.gitnexus).toBeDefined();
+    expect(config.servers?.gitnexus?.type).toBe('stdio');
+    expect(config.servers?.gitnexus?.command).toBeTruthy();
+    expect(config.servers?.gitnexus?.args).toBeTruthy();
   });
 
   it('installs packaged, flat-file, and directory skills into cursor skills directory', async () => {

@@ -50,6 +50,8 @@ export interface AnalyzeOptions {
   skipAgentsMd?: boolean;
   /** Omit volatile symbol/relationship counts from AGENTS.md and CLAUDE.md. */
   noStats?: boolean;
+  /** Comma-separated list of IDEs to generate context files for: claude, cursor, vscode, all. */
+  ide?: string;
 }
 
 export interface AnalyzeResult {
@@ -329,7 +331,7 @@ export async function runFullAnalysis(
           processes: pipelineResult.processResult?.stats.totalProcesses,
         },
         undefined,
-        { skipAgentsMd: options.skipAgentsMd, noStats: options.noStats },
+        { skipAgentsMd: options.skipAgentsMd, noStats: options.noStats, ide: options.ide },
       );
     } catch {
       // Best-effort — don't fail the entire analysis for context file issues

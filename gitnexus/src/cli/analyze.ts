@@ -57,6 +57,8 @@ export interface AnalyzeOptions {
   skipAgentsMd?: boolean;
   /** Omit volatile symbol/relationship counts from AGENTS.md and CLAUDE.md. */
   noStats?: boolean;
+  /** Comma-separated list of IDEs to generate context files for: claude, cursor, vscode, all. */
+  ide?: string;
   /** Index the folder even when no .git directory is present. */
   skipGit?: boolean;
 }
@@ -188,6 +190,7 @@ export const analyzeCommand = async (inputPath?: string, options?: AnalyzeOption
         skipGit: options?.skipGit,
         skipAgentsMd: options?.skipAgentsMd,
         noStats: options?.noStats,
+        ide: options?.ide,
       },
       {
         onProgress: (_phase, percent, message) => {
@@ -251,7 +254,7 @@ export const analyzeCommand = async (inputPath?: string, options?: AnalyzeOption
               processes: s.processes,
             },
             skillResult.skills,
-            { skipAgentsMd: options?.skipAgentsMd, noStats: options?.noStats },
+            { skipAgentsMd: options?.skipAgentsMd, noStats: options?.noStats, ide: options?.ide },
           );
         }
       } catch {

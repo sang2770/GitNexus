@@ -16,7 +16,7 @@ program.name('gitnexus').description('GitNexus local CLI and MCP server').versio
 
 program
   .command('setup')
-  .description('One-time setup: configure MCP for Cursor, Claude Code, OpenCode, Codex')
+  .description('One-time setup: configure MCP for VS Code, Cursor, Claude Code, OpenCode, Codex')
   .action(createLazyAction(() => import('./setup.js'), 'setupCommand'));
 
 program
@@ -27,6 +27,10 @@ program
   .option('--skills', 'Generate repo-specific skill files from detected communities')
   .option('--skip-agents-md', 'Skip updating the gitnexus section in AGENTS.md and CLAUDE.md')
   .option('--no-stats', 'Omit volatile file/symbol counts from AGENTS.md and CLAUDE.md')
+  .option(
+    '--ide <ides>',
+    'Comma-separated list of IDEs to generate context files for: claude, cursor, vscode, all (default: all)',
+  )
   .option('--skip-git', 'Index a folder without requiring a .git directory')
   .option('-v, --verbose', 'Enable verbose ingestion warnings (default: false)')
   .addHelpText(

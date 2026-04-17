@@ -91,6 +91,26 @@ function mergeMcpConfig(existing: any): any {
 }
 
 /**
+ * Merge gitnexus entry into VS Code MCP config (.vscode/mcp.json or user mcp.json).
+ * VS Code uses the top-level `servers` key.
+ */
+function mergeVSCodeMcpConfig(existing: any): any {
+  if (!existing || typeof existing !== 'object') {
+    existing = {};
+  }
+  if (!existing.servers || typeof existing.servers !== 'object') {
+    existing.servers = {};
+  }
+  const entry = getMcpEntry();
+  existing.servers.gitnexus = {
+    type: 'stdio',
+    command: entry.command,
+    args: entry.args,
+  };
+  return existing;
+}
+
+/**
  * Try to read a JSON file, returning null if it doesn't exist or is invalid.
  */
 async function readJsonFile(filePath: string): Promise<any | null> {
@@ -275,6 +295,76 @@ async function setupOpenCode(result: SetupResult): Promise<void> {
     result.configured.push('OpenCode');
   } catch (err: any) {
     result.errors.push(`OpenCode: ${err.message}`);
+  }
+}
+
+interface VSCodeConfigTarget {
+  name: string;
+  configPath: string;
+}
+
+/**
+ * Resolve candidate VS Code user MCP config paths across stable/insiders.
+ */
+function getVSCodeConfigTargets(): VSCodeConfigTarget[] {
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return [
+      { name: 'VS Code', configPath: path.join(appData, 'Code', 'User', 'mcp.json') },
+      {
+        name: 'VS Code Insiders',
+        configPath: path.join(appData, 'Code - Insiders', 'User', 'mcp.json'),
+      },
+    ];
+  }
+
+  if (process.platform === 'darwin') {
+    const appSupport = path.join(os.homedir(), 'Library', 'Application Support');
+    return [
+      { name: 'VS Code', configPath: path.join(appSupport, 'Code', 'User', 'mcp.json') },
+      {
+        name: 'VS Code Insiders',
+        configPath: path.join(appSupport, 'Code - Insiders', 'User', 'mcp.json'),
+      },
+    ];
+  }
+
+  return [
+    { name: 'VS Code', configPath: path.join(os.homedir(), '.config', 'Code', 'User', 'mcp.json') },
+    {
+      name: 'VS Code Insiders',
+      configPath: path.join(os.homedir(), '.config', 'Code - Insiders', 'User', 'mcp.json'),
+    },
+  ];
+}
+
+async function setupVSCode(result: SetupResult): Promise<void> {
+  const targets = getVSCodeConfigTargets();
+  let configuredAny = false;
+
+  for (const target of targets) {
+    const userDir = path.dirname(target.configPath);
+    if (!(await dirExists(userDir))) {
+      result.skipped.push(`${target.name} (not installed)`);
+      continue;
+    }
+
+    try {
+      const existing = await readJsonFile(target.configPath);
+      const updated = mergeVSCodeMcpConfig(existing);
+      await writeJsonFile(target.configPath, updated);
+      result.configured.push(`${target.name} MCP`);
+      configuredAny = true;
+    } catch (err: any) {
+      result.errors.push(`${target.name}: ${err.message}`);
+    }
+  }
+
+  if (
+    !configuredAny &&
+    targets.every((t) => result.skipped.includes(`${t.name} (not installed)`))
+  ) {
+    return;
   }
 }
 
@@ -490,6 +580,7 @@ export const setupCommand = async () => {
   };
 
   // Detect and configure each editor's MCP
+  await setupVSCode(result);
   await setupCursor(result);
   await setupClaudeCode(result);
   await setupOpenCode(result);
