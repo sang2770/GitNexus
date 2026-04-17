@@ -31,7 +31,10 @@ import {
   cleanupOldKuzuFiles,
 } from '../storage/repo-manager.js';
 import { getCurrentCommit, hasGitDir } from '../storage/git.js';
+import type { CachedEmbedding } from './embeddings/types.js';
 import { generateAIContextFiles } from '../cli/ai-context.js';
+import { EMBEDDING_TABLE_NAME } from './lbug/schema.js';
+import { STALE_HASH_SENTINEL } from './lbug/schema.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -140,7 +143,7 @@ export async function runFullAnalysis(
 
   // ── Cache embeddings from existing index before rebuild ────────────
   let cachedEmbeddingNodeIds = new Set<string>();
-  let cachedEmbeddings: Array<{ nodeId: string; embedding: number[] }> = [];
+  let cachedEmbeddings: CachedEmbedding[] = [];
 
   if (options.embeddings && existingMeta && !options.force) {
     try {
@@ -218,15 +221,14 @@ export async function runFullAnalysis(
         cachedEmbeddingNodeIds = new Set();
       } else {
         progress('embeddings', 88, `Restoring ${cachedEmbeddings.length} cached embeddings...`);
+        const { batchInsertEmbeddings: batchInsert } =
+          await import('./embeddings/embedding-pipeline.js');
         const EMBED_BATCH = 200;
         for (let i = 0; i < cachedEmbeddings.length; i += EMBED_BATCH) {
           const batch = cachedEmbeddings.slice(i, i + EMBED_BATCH);
-          const paramsList = batch.map((e) => ({ nodeId: e.nodeId, embedding: e.embedding }));
+
           try {
-            await executeWithReusedStatement(
-              `MERGE (e:CodeEmbedding {nodeId: $nodeId}) SET e.embedding = $embedding`,
-              paramsList,
-            );
+            await batchInsert(executeWithReusedStatement, batch);
           } catch {
             /* some may fail if node was removed, that's fine */
           }
@@ -253,6 +255,18 @@ export async function runFullAnalysis(
         httpMode ? 'Connecting to embedding endpoint...' : 'Loading embedding model...',
       );
       const { runEmbeddingPipeline } = await import('./embeddings/embedding-pipeline.js');
+      // Build a Map<nodeId, contentHash> from cached embeddings for incremental mode
+      let existingEmbeddings: Map<string, string> | undefined;
+      if (cachedEmbeddingNodeIds.size > 0) {
+        existingEmbeddings = new Map<string, string>();
+        for (const e of cachedEmbeddings) {
+          existingEmbeddings.set(e.nodeId, e.contentHash ?? STALE_HASH_SENTINEL);
+        }
+      }
+
+      const { readServerMapping } = await import('./embeddings/server-mapping.js');
+      const projectName = path.basename(repoPath);
+      const serverName = await readServerMapping(projectName);
       await runEmbeddingPipeline(
         executeQuery,
         executeWithReusedStatement,
@@ -268,6 +282,8 @@ export async function runFullAnalysis(
         },
         {},
         cachedEmbeddingNodeIds.size > 0 ? cachedEmbeddingNodeIds : undefined,
+        { repoName: projectName, serverName },
+        existingEmbeddings,
       );
     }
 
@@ -277,7 +293,9 @@ export async function runFullAnalysis(
     // Count embeddings in the index (cached + newly generated)
     let embeddingCount = 0;
     try {
-      const embResult = await executeQuery(`MATCH (e:CodeEmbedding) RETURN count(e) AS cnt`);
+      const embResult = await executeQuery(
+        `MATCH (e:${EMBEDDING_TABLE_NAME}) RETURN count(e) AS cnt`,
+      );
       embeddingCount = embResult?.[0]?.cnt ?? 0;
     } catch {
       /* table may not exist if embeddings never ran */
