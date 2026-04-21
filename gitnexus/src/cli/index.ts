@@ -17,6 +17,10 @@ program.name('gitnexus').description('GitNexus local CLI and MCP server').versio
 program
   .command('setup')
   .description('One-time setup: configure MCP for VS Code, Cursor, Claude Code, OpenCode, Codex')
+  .option(
+    '--ide <ides>',
+    'Comma-separated target editors for setup: vscode, cursor, claude, opencode, codex, all (default: all)',
+  )
   .action(createLazyAction(() => import('./setup.js'), 'setupCommand'));
 
 program

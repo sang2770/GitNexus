@@ -25,6 +25,52 @@ interface SetupResult {
   errors: string[];
 }
 
+type SetupIdeTarget = 'vscode' | 'cursor' | 'claude' | 'opencode' | 'codex';
+
+export interface SetupOptions {
+  /** Comma-separated list of IDEs: vscode, cursor, claude, opencode, codex, all */
+  ide?: string;
+}
+
+function parseSetupIdeTargets(raw?: string): Set<SetupIdeTarget> {
+  const allTargets: SetupIdeTarget[] = ['vscode', 'cursor', 'claude', 'opencode', 'codex'];
+  if (!raw || raw.trim().length === 0) {
+    return new Set(allTargets);
+  }
+
+  const normalized = raw
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0);
+
+  if (normalized.length === 0 || normalized.includes('all')) {
+    return new Set(allTargets);
+  }
+
+  const allowed = new Set<SetupIdeTarget>(allTargets);
+  const selected = new Set<SetupIdeTarget>();
+  const invalid: string[] = [];
+
+  for (const item of normalized) {
+    if (allowed.has(item as SetupIdeTarget)) {
+      selected.add(item as SetupIdeTarget);
+    } else {
+      invalid.push(item);
+    }
+  }
+
+  if (invalid.length > 0) {
+    throw new Error(
+      `Invalid --ide value(s): ${invalid.join(', ')}. Use one or more of: vscode,cursor,claude,opencode,codex,all`,
+    );
+  }
+
+  if (selected.size === 0) {
+    return new Set(allTargets);
+  }
+  return selected;
+}
+
 /**
  * Resolve the absolute path to the `gitnexus` binary if it's installed
  * globally (or via npm -g / yarn global). Returns null when not found.
@@ -563,10 +609,23 @@ async function installCodexSkills(result: SetupResult): Promise<void> {
 
 // ─── Main command ──────────────────────────────────────────────────
 
-export const setupCommand = async () => {
+export const setupCommand = async (options?: SetupOptions) => {
   console.log('');
   console.log('  GitNexus Setup');
   console.log('  ==============');
+  console.log('');
+
+  let selectedTargets: Set<SetupIdeTarget>;
+  try {
+    selectedTargets = parseSetupIdeTargets(options?.ide);
+  } catch (err: any) {
+    console.log(`  ${err.message}`);
+    console.log('');
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log(`  Targets: ${Array.from(selectedTargets).join(', ')}`);
   console.log('');
 
   // Ensure global directory exists
@@ -580,18 +639,20 @@ export const setupCommand = async () => {
   };
 
   // Detect and configure each editor's MCP
-  await setupVSCode(result);
-  await setupCursor(result);
-  await setupClaudeCode(result);
-  await setupOpenCode(result);
-  await setupCodex(result);
+  if (selectedTargets.has('vscode')) await setupVSCode(result);
+  if (selectedTargets.has('cursor')) await setupCursor(result);
+  if (selectedTargets.has('claude')) await setupClaudeCode(result);
+  if (selectedTargets.has('opencode')) await setupOpenCode(result);
+  if (selectedTargets.has('codex')) await setupCodex(result);
 
   // Install global skills for platforms that support them
-  await installClaudeCodeSkills(result);
-  await installClaudeCodeHooks(result);
-  await installCursorSkills(result);
-  await installOpenCodeSkills(result);
-  await installCodexSkills(result);
+  if (selectedTargets.has('claude')) {
+    await installClaudeCodeSkills(result);
+    await installClaudeCodeHooks(result);
+  }
+  if (selectedTargets.has('cursor')) await installCursorSkills(result);
+  if (selectedTargets.has('opencode')) await installOpenCodeSkills(result);
+  if (selectedTargets.has('codex')) await installCodexSkills(result);
 
   // Print results
   if (result.configured.length > 0) {

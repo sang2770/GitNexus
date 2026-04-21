@@ -68,7 +68,9 @@ export const isAllowedOrigin = (origin: string | undefined): boolean => {
     origin === 'http://127.0.0.1' ||
     origin.startsWith('http://[::1]:') ||
     origin === 'http://[::1]' ||
-    origin === 'https://gitnexus.vercel.app'
+    origin === 'https://gitnexus.vercel.app' ||
+    // VS Code webview panels use the vscode-webview:// scheme
+    origin.startsWith('vscode-webview://')
   ) {
     return true;
   }
